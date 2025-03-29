@@ -15,6 +15,7 @@ use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::time::{sleep, Duration};
+use tauri::Manager;
 use windows::{
     core::{PCWSTR, PWSTR},
     Win32::Foundation::{GetLastError, HANDLE, HWND},
@@ -28,6 +29,9 @@ use windows::{
         WinVerifyTrust, WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0,
         WINTRUST_DATA_PROVIDER_FLAGS, WINTRUST_DATA_UICONTEXT, WINTRUST_FILE_INFO, WTD_CHOICE_FILE,
         WTD_REVOKE_NONE, WTD_STATEACTION_VERIFY, WTD_UI_NONE,
+    },
+    Win32::System::Registry::{
+        RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ,
     },
 };
 
@@ -499,7 +503,7 @@ async fn run_installer(
              Write-Output \"ERROR:$($_.Exception.Message)\";\n\
              exit 1;\n\
              }}",
-            path.to_string_lossy().replace("'", "''"),  // Escape single quotes for PowerShell
+            path.to_string_lossy().replace("'", "''"),
             installer_args_str.replace("'", "''")
         );
 
@@ -664,14 +668,286 @@ async fn run_installer_user_mode(
     result
 }
 
+async fn check_webview2_runtime() -> Result<bool, String> {
+    println!("[INFO] Checking WebView2 Runtime installation");
+
+    let webview2_reg_paths = [
+        r"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
+        r"Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
+    ];
+
+    for (i, path) in webview2_reg_paths.iter().enumerate() {
+        let hkey = if i == 0 { HKEY_LOCAL_MACHINE } else { HKEY_CURRENT_USER };
+
+        unsafe {
+            let mut key_handle = HKEY::default();
+            let wide_path: Vec<u16> = OsStr::new(path).encode_wide().chain(Some(0)).collect();
+
+            let result = RegOpenKeyExW(
+                hkey,
+                PCWSTR(wide_path.as_ptr()),
+                0,
+                KEY_READ,
+                &mut key_handle,
+            );
+
+            if result.is_ok() {
+                let value_name = wide_null("pv");
+                let mut buffer_size: u32 = 0;
+
+                let _ = RegQueryValueExW(
+                    key_handle,
+                    PCWSTR(value_name.as_ptr()),
+                    None,
+                    None,
+                    None,
+                    Some(&mut buffer_size),
+                );
+
+                if buffer_size > 0 {
+                    let mut buffer = vec![0u8; buffer_size as usize];
+
+                    let result = RegQueryValueExW(
+                        key_handle,
+                        PCWSTR(value_name.as_ptr()),
+                        None,
+                        None,
+                        Some(buffer.as_mut_ptr()),
+                        Some(&mut buffer_size),
+                    );
+
+                    if result.is_ok() {
+                        let version = String::from_utf16_lossy(std::slice::from_raw_parts(
+                            buffer.as_ptr() as *const u16,
+                            (buffer_size / 2) as usize - 1, // null終端を除く
+                        ));
+
+                        println!("[INFO] WebView2 Runtime version: {}", version);
+
+                        if version != "0.0.0.0" && !version.is_empty() {
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    println!("[INFO] WebView2 Runtime is not installed");
+    Ok(false)
+}
+
+async fn download_and_install_webview2_runtime() -> Result<bool, String> {
+    println!("[INFO] Downloading WebView2 Runtime bootstrapper");
+
+    let temp_dir = env::temp_dir();
+    let notify_script_path = temp_dir.join("webview2_install_notify.ps1");
+    let notify_script = r#"
+    Add-Type -AssemblyName System.Windows.Forms
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = "Installing WebView2 Runtime"
+    $form.Size = New-Object System.Drawing.Size(400, 150)
+    $form.StartPosition = "CenterScreen"
+    $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+    $form.MaximizeBox = $false
+    $form.MinimizeBox = $false
+
+    $label = New-Object System.Windows.Forms.Label
+    $label.Location = New-Object System.Drawing.Point(20, 20)
+    $label.Size = New-Object System.Drawing.Size(350, 80)
+    $label.Text = "Floorp Installer is installing Microsoft WebView2 Runtime.`n`nThis is required to display Floorp Installer interface.`n`nPlease wait..."
+    $label.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+    $form.Controls.Add($label)
+
+    $form.Show()
+
+    [System.Windows.Forms.Application]::Run($form)
+    "#;
+
+    std::fs::write(&notify_script_path, notify_script).map_err(|e|
+        format!("Failed to create notification script: {}", e))?;
+
+    let _notify_process = Command::new("powershell.exe")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-File")
+        .arg(&notify_script_path)
+        .spawn()
+        .map_err(|e| format!("Failed to show notification: {}", e))?;
+
+    let url = "https://go.microsoft.com/fwlink/p/?LinkId=2124703";
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let installer_path = temp_dir.join(format!("MicrosoftEdgeWebview2Setup_{}.exe", timestamp));
+
+    for entry in std::fs::read_dir(&temp_dir).unwrap_or_else(|_| std::fs::read_dir(".").unwrap()) {
+        if let Ok(entry) = entry {
+            let path = entry.path();
+            if let Some(file_name) = path.file_name() {
+                if let Some(file_name_str) = file_name.to_str() {
+                    if file_name_str.starts_with("MicrosoftEdgeWebview2Setup_") && file_name_str.ends_with(".exe") {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+            }
+        }
+    }
+
+    if let Err(e) = download_file(url, &installer_path).await {
+        return Err(format!("Failed to download WebView2 Runtime installer: {}", e));
+    }
+
+    println!("[INFO] Running WebView2 Runtime installer from: {}", installer_path.display());
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let max_retries = 3;
+    let mut retry_count = 0;
+    let mut last_error = String::new();
+
+    while retry_count < max_retries {
+        match Command::new(&installer_path)
+            .args(&["/silent", "/install"])
+            .spawn()
+        {
+            Ok(mut child) => {
+                match child.wait().await {
+                    Ok(status) => {
+                        if status.success() {
+                            println!("[INFO] WebView2 Runtime installation completed successfully");
+                            let _ = tokio::fs::remove_file(&installer_path).await;
+
+                            let close_dialog_script = r#"
+                            Get-Process | Where-Object { $_.MainWindowTitle -eq "Installing WebView2 Runtime" } | ForEach-Object { $_.CloseMainWindow() }
+                            "#;
+                            let close_script_path = temp_dir.join("close_webview2_notify.ps1");
+                            let _ = std::fs::write(&close_script_path, close_dialog_script);
+                            let _ = Command::new("powershell.exe")
+                                .arg("-ExecutionPolicy")
+                                .arg("Bypass")
+                                .arg("-Command")
+                                .arg(close_dialog_script)
+                                .spawn()
+                                .map_err(|e| println!("[WARN] Failed to close notification dialog: {}", e));
+
+                            return Ok(true);
+                        } else {
+                            let code = status.code().unwrap_or(-1);
+                            println!("[ERROR] WebView2 Runtime installation failed with exit code: {}", code);
+                            let _ = tokio::fs::remove_file(&installer_path).await;
+                            let close_dialog_script = r#"
+                            Get-Process | Where-Object { $_.MainWindowTitle -eq "Installing WebView2 Runtime" } | ForEach-Object { $_.CloseMainWindow() }
+                            "#;
+                            let _ = Command::new("powershell.exe")
+                                .arg("-ExecutionPolicy")
+                                .arg("Bypass")
+                                .arg("-Command")
+                                .arg(close_dialog_script)
+                                .spawn()
+                                .map_err(|e| println!("[WARN] Failed to close notification dialog: {}", e));
+
+                            return Ok(false);
+                        }
+                    }
+                    Err(e) => {
+                        last_error = format!("Failed to wait for WebView2 Runtime installer: {}", e);
+                        println!("[WARN] {}, retrying ({}/{})", last_error, retry_count + 1, max_retries);
+                    }
+                }
+            }
+            Err(e) => {
+                last_error = format!("Failed to start WebView2 Runtime installer: {}", e);
+                println!("[WARN] {}, retrying ({}/{})", last_error, retry_count + 1, max_retries);
+            }
+        }
+
+        retry_count += 1;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    Err(last_error)
+}
+
+#[tauri::command]
+async fn check_and_install_webview2_runtime() -> Result<String, String> {
+    match check_webview2_runtime().await {
+        Ok(true) => Ok("WebView2 Runtime is already installed".to_string()),
+        Ok(false) => {
+            match download_and_install_webview2_runtime().await {
+                Ok(true) => Ok("WebView2 Runtime was successfully installed".to_string()),
+                Ok(false) => Err("WebView2 Runtime installation failed".to_string()),
+                Err(e) => Err(format!("WebView2 Runtime installation error: {}", e)),
+            }
+        },
+        Err(e) => Err(format!("WebView2 Runtime check failed: {}", e))
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             download_and_run_installer,
             launch_floorp_browser,
-            exit_application
+            exit_application,
+            check_and_install_webview2_runtime
         ])
+        .setup(|app| {
+            let app_handle = app.handle().clone();
+
+            tauri::async_runtime::spawn(async move {
+                match check_webview2_runtime().await {
+                    Ok(true) => {
+                        println!("[INFO] WebView2 Runtime is already installed");
+                    },
+                    Ok(false) => {
+                        let result = download_and_install_webview2_runtime().await;
+                        match result {
+                            Ok(true) => {
+                                println!("[INFO] WebView2 Runtime was successfully installed");
+                                println!("[INFO] Restarting application to apply WebView2 Runtime...");
+                                tokio::time::sleep(Duration::from_secs(1)).await;
+
+                                println!("[INFO] Restarting application...");
+
+                                for (_, window) in app_handle.webview_windows() {
+                                    let _ = window.close();
+                                }
+
+                                let process_id = std::process::id();
+                                println!("[INFO] Current process ID: {}", process_id);
+
+                                if let Ok(exe_path) = std::env::current_exe() {
+                                    println!("[INFO] Executable path: {}", exe_path.display());
+
+                                    let _ = tokio::process::Command::new(&exe_path)
+                                        .spawn()
+                                        .map_err(|e| println!("[ERROR] Failed to restart: {}", e));
+
+                                    std::process::exit(0);
+                                } else {
+                                    println!("[ERROR] Failed to get executable path");
+                                }
+                            },
+                            Ok(false) => {
+                                println!("[ERROR] WebView2 Runtime installation failed");
+                            },
+                            Err(e) => {
+                                println!("[ERROR] WebView2 Runtime installation error: {}", e);
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        println!("[ERROR] WebView2 Runtime check failed: {}", e);
+                    }
+                }
+            });
+
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
