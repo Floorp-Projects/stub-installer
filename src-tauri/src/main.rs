@@ -81,14 +81,6 @@ async fn download_and_run_installer(
         }
     }
 
-    if env::var("RUST_ENV")
-        .map(|v| v == "development")
-        .unwrap_or(false)
-    {
-        println!("[INFO] Development mode: Skipping installer execution");
-        return Ok("rust.success.downloaded_dev_mode".to_string());
-    }
-
     println!("[INFO] Running Floorp installer...");
     match run_installer(&path, use_admin, custom_install_path).await {
         Ok(status) => {
@@ -673,8 +665,6 @@ async fn run_installer_user_mode(
 }
 
 fn main() {
-    #[cfg(debug_assertions)]
-    // env::set_var("RUST_ENV", "development");
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
