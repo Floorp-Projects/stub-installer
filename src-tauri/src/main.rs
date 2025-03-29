@@ -745,7 +745,7 @@ async fn download_and_install_webview2_runtime() -> Result<bool, String> {
     let notify_script = r#"
     Add-Type -AssemblyName System.Windows.Forms
     $form = New-Object System.Windows.Forms.Form
-    $form.Text = "Installing WebView2 Runtime"
+    $form.Text = "Floorp Installer | WebView2 Runtime"
     $form.Size = New-Object System.Drawing.Size(400, 150)
     $form.StartPosition = "CenterScreen"
     $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
@@ -821,7 +821,7 @@ async fn download_and_install_webview2_runtime() -> Result<bool, String> {
                             let _ = tokio::fs::remove_file(&installer_path).await;
 
                             let close_dialog_script = r#"
-                            Get-Process | Where-Object { $_.MainWindowTitle -eq "Installing WebView2 Runtime" } | ForEach-Object { $_.CloseMainWindow() }
+                            Get-Process | Where-Object { $_.MainWindowTitle -eq "Floorp Installer | WebView2 Runtime" } | ForEach-Object { $_.CloseMainWindow() }
                             "#;
                             let close_script_path = temp_dir.join("close_webview2_notify.ps1");
                             let _ = std::fs::write(&close_script_path, close_dialog_script);
@@ -839,7 +839,7 @@ async fn download_and_install_webview2_runtime() -> Result<bool, String> {
                             println!("[ERROR] WebView2 Runtime installation failed with exit code: {}", code);
                             let _ = tokio::fs::remove_file(&installer_path).await;
                             let close_dialog_script = r#"
-                            Get-Process | Where-Object { $_.MainWindowTitle -eq "Installing WebView2 Runtime" } | ForEach-Object { $_.CloseMainWindow() }
+                            Get-Process | Where-Object { $_.MainWindowTitle -eq "Floorp Installer | WebView2 Runtime" } | ForEach-Object { $_.CloseMainWindow() }
                             "#;
                             let _ = Command::new("powershell.exe")
                                 .arg("-ExecutionPolicy")
