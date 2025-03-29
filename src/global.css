@@ -1,0 +1,9 @@
+@import "tailwindcss";
+@plugin "daisyui" {
+  themes: lofi --default, dark --prefersdark;
+}
+
+* {
+  scrollbar-width: none !important;
+  user-select: none !important;
+}
