@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "stub-installer",
+  "productName": "floorp-win64-stub-installer",
   "version": "0.1.0",
   "identifier": "app.stubInstaller.floorp",
   "build": {

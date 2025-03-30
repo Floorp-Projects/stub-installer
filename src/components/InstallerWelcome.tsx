@@ -113,7 +113,7 @@ const InstallerWelcome: React.FC<InstallerWelcomeProps> = ({ onInstall }) => {
                                     {t('app.installer.change')}
                                 </button>
                             </div>
-                            <div className="p-2 bg-base-200 rounded-md text-sm text-left break-all">
+                            <div className="p-2 bg-base-200 rounded-md text-sm text-left break-all h-[60px]">
                                 {useCustomPath ? customPath : defaultInstallPath}
                             </div>
                         </div>
